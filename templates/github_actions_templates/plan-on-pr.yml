@@ -1,0 +1,84 @@
+name: Plan/Test On Pull Request
+on:
+    pull_request:
+        branches:
+            - dev
+        paths:
+            - infrastructure_aws/**
+jobs:
+    lint:
+        name: Lint
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check Out Code
+              uses: actions/checkout@v4
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v1
+              with:
+                terraform_version: 1.6.0
+            
+            - name: Run format check
+              run: terraform fmt -check -diff -recursive ./infrastructure_aws
+
+    plan:
+        name: Plan
+        runs-on: ubuntu-latest
+        permissions:
+            id-token: write
+            contents: read
+            pull-requests: write
+        strategy:
+            fail-fast: false
+        steps:
+            - name: Check Out Code
+              uses: actions/checkout@v4
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v1
+              with:
+                terraform_version: 1.6.0
+            - name: Configure AWS Credentials
+              id: aws-credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  role-to-assume: ${{ env.aws-terraform-role }}
+                  aws-region: us-east-2
+                  output-credentials: true
+            - name: Initialize Terraform
+              run: |
+                cd infrastructure_aws
+                terraform init -backend-config="key=${{ github.base_ref }}.tfstate"
+            
+            - name: Plan Terraform
+              id: plan
+              env:
+                  DEPLOYMENT_STAGE: ${{ github.base_ref }}
+
+              run: |
+                cd infrastructure_aws
+                terraform plan -input=false -no-color \
+                -var environment=$DEPLOYMENT_STAGE \
+                -out=tfplan && terraform show -no-color tfplan
+
+            - name: Reformat Plan
+              run: |
+                echo '${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}' \
+                | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > plan.txt
+            
+            - name: Put Plan in Env Var
+              run: |
+                PLAN=$(cat plan.txt)
+                echo "PLAN<<EOF" >> $GITHUB_ENV
+                echo "$PLAN" >> $GITHUB_ENV
+                echo "EOF" >> $GITHUB_ENV
+    
+            - name: Add PR Comments
+              uses: mshick/add-pr-comment@v2
+              with:
+                allow-repeats: true
+                message: |
+                    ## Terraform Plan
+                    ```
+                    ${{ env.PLAN }}
+                    ```

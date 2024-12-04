@@ -1,0 +1,119 @@
+name: Plan and Apply on Merge
+
+on:
+    push:
+        branches:
+            - dev
+        paths:
+            - infrastructure_aws/**
+
+jobs:
+    inform_about_apply:
+        name: Inform About Apply
+        runs-on: ubuntu-latest
+
+        steps:
+          - name: Note that Apply is Running on PR.
+            uses: mshick/add-pr-comment@v2
+            with: 
+                message: |
+                  ***Running Terraform Apply***
+                  Please Wait
+    plan_and_apply:
+        name: Plan and Apply
+        runs-on: ubuntu-latest
+        permissions:
+          id-token: write
+          contents: read
+          pull-requests: write
+        strategy:
+            fail-fast: false
+        steps:
+            - name: Check Out Code
+              uses: actions/checkout@v4
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v1
+              with:
+                terraform_version: 1.6.0
+            - name: Configure AWS Credentials
+              id: aws-credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  role-to-assume: ${{ env.aws-terraform-role }}
+                  aws-region: us-east-2
+                  output-credentials: true
+            - name: Initialize Terraform
+              run: |
+                cd infrastructure_aws
+                terraform init -backend-config="key=${{ github.ref_name }}.tfstate"
+            
+            - name: Plan Terraform
+              id: plan
+              env:
+                DEPLOYMENT_STAGE: ${{ github.ref_name }}
+              run: |
+                cd infrastructure_aws
+                terraform plan -input=false -no-color \
+                -var environment=$DEPLOYMENT_STAGE \
+                -out=terraform.plan && terraform show -no-color terraform.plan
+
+            - name: Reformat Plan
+              if: steps.plan.outcome == 'success'
+              run: |
+                  echo '${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}' \
+                  | sed -E 's/^([[:space:]]+)([-+])/\2\1/g' > plan.txt
+
+            - name: Apply Terraform
+              if: steps.plan.outcome == 'success'
+              id: apply
+              continue-on-error: true
+              run: |
+                cd infrastructure_aws
+                terraform apply -input=false -no-color \
+                terraform.plan
+              
+            - name: Put Plan in Env Var
+              run: |
+                  PLAN=$(cat plan.txt)
+                  echo "PLAN<<EOF" >> $GITHUB_ENV
+                  echo "$PLAN" >> $GITHUB_ENV
+                  echo "EOF" >> $GITHUB_ENV
+      
+            - name: Add Sucess Comments
+              if: steps.plan.outcome == 'success' && steps.apply.outcome == 'success'
+              uses: mshick/add-pr-comment@v2
+              with:
+                  message: |
+                      Applying Plan
+                      ```
+                      ${{ env.PLAN }}
+                      ```
+
+                      ```
+                      ${{ steps.apply.outputs.stdout }}
+                      ```
+
+            - name: Add Plan Failed Comments
+              if: steps.plan.outcome == 'failure'
+              uses: mshick/add-pr-comment@v2
+              with:
+                  message: |
+                      Terraform Plan Failed
+                      ```
+                      ${{ steps.plan.outputs.stderr }}
+                      ```
+
+            - name: Add Apply Failed Comments
+              if: steps.apply.outcome == 'failure'
+              uses: mshick/add-pr-comment@v2
+              with:
+                  message: |
+                      Terraform Apply Failed
+                      ```
+                      ${{ steps.apply.outputs.stderr }}
+                      ```
+            - name: Set Exit Code on Fail
+              if: steps.plan.outcome == 'failure' || steps.apply.outcome == 'failure'
+              run: |
+                  exit 1
